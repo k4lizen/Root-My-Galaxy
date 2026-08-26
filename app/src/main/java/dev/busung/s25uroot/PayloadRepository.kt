@@ -10,7 +10,7 @@ import java.net.URL
 import org.json.JSONObject
 
 data class VerifiedPayloads(
-    val profile: TargetProfile,
+    val profileId: String,
     val exploit: File,
     val kernelSu: File,
 )
@@ -49,7 +49,7 @@ class PayloadRepository(private val context: Context) {
         )
         Os.chmod(exploit.absolutePath, 0b100100100)
         Os.chmod(kernelSu.absolutePath, 0b100100100)
-        return VerifiedPayloads(profile, exploit, kernelSu)
+        return VerifiedPayloads(profile.profileId, exploit, kernelSu)
     }
 
     private fun downloadArtifact(

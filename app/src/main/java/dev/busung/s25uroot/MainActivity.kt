@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.text.format.Formatter
 import android.view.HapticFeedbackConstants
 import android.view.View
 import android.widget.Toast
@@ -67,9 +68,11 @@ import androidx.compose.material.icons.rounded.BrightnessAuto
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.SelectAll
 import androidx.compose.material.icons.rounded.Error
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Info
@@ -165,6 +168,7 @@ class MainActivity : ComponentActivity() {
     private var themeMode by mutableStateOf(AppThemeMode.System)
     private var advancedMode by mutableStateOf(false)
     private var shizukuMode by mutableStateOf(false)
+    private var offlineMode by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -174,6 +178,7 @@ class MainActivity : ComponentActivity() {
         themeMode = AppPreferences.themeMode(this)
         advancedMode = AppPreferences.advancedMode(this)
         shizukuMode = AppPreferences.shizukuMode(this)
+        offlineMode = AppPreferences.offlineMode(this)
         setContent {
             RootMyGalaxyTheme(accentColor = accentColor, themeMode = themeMode) {
                 RootApp(
@@ -182,6 +187,7 @@ class MainActivity : ComponentActivity() {
                     themeMode = themeMode,
                     advancedMode = advancedMode,
                     shizukuMode = shizukuMode,
+                    offlineMode = offlineMode,
                     onAccentColorChanged = { color ->
                         AppPreferences.setAccentColor(this, color)
                         accentColor = color
@@ -197,6 +203,14 @@ class MainActivity : ComponentActivity() {
                     onShizukuModeChanged = { enabled ->
                         AppPreferences.setShizukuMode(this, enabled)
                         shizukuMode = enabled
+                    },
+                    onOfflineModeChanged = { enabled ->
+                        AppPreferences.setOfflineMode(this, enabled)
+                        offlineMode = enabled
+                        // The support check resolves against a different
+                        // source now, so re-run it rather than leaving the
+                        // overview showing the old verdict.
+                        installViewModel.refresh()
                     },
                     openInstaller = { profileId ->
                         val installer = Intent(this, InstallActivity::class.java)
@@ -279,15 +293,18 @@ private fun RootApp(
     themeMode: AppThemeMode,
     advancedMode: Boolean,
     shizukuMode: Boolean,
+    offlineMode: Boolean,
     onAccentColorChanged: (AccentColor) -> Unit,
     onThemeModeChanged: (AppThemeMode) -> Unit,
     onAdvancedModeChanged: (Boolean) -> Unit,
     onShizukuModeChanged: (Boolean) -> Unit,
+    onOfflineModeChanged: (Boolean) -> Unit,
     openInstaller: (String?) -> Unit,
 ) {
     val installState by installViewModel.state.collectAsStateWithLifecycle()
     val history by installViewModel.history.collectAsStateWithLifecycle()
     val targetCatalog by installViewModel.targetCatalog.collectAsStateWithLifecycle()
+    val localPayloads by installViewModel.localPayloads.collectAsStateWithLifecycle()
     var selectedPage by remember { mutableStateOf(AppPage.Overview) }
     var showInstallConfirmation by remember { mutableStateOf(false) }
     var showTargetPicker by remember { mutableStateOf(false) }
@@ -300,7 +317,7 @@ private fun RootApp(
     var updateStatus by remember { mutableStateOf<UpdateStatus>(UpdateStatus.Idle) }
     var updateCardDismissed by remember { mutableStateOf(false) }
     val checkForUpdate: () -> Unit = {
-        if (!updateStatus.busy) {
+        if (!offlineMode && !updateStatus.busy) {
             updateStatus = UpdateStatus.Checking
             scope.launch {
                 val info = AppUpdater.fetchLatestRelease()
@@ -313,7 +330,10 @@ private fun RootApp(
             }
         }
     }
-    val startDownload: (UpdateInfo) -> Unit = { info ->
+    val startDownload: (UpdateInfo) -> Unit = startDownload@{ info ->
+        // A check that was already in flight when offline mode was turned on
+        // can still land an Available status; nothing may act on it.
+        if (offlineMode) return@startDownload
         val apkUrl = info.apkUrl
         if (apkUrl == null) {
             AppUpdater.openReleasesPage(context)
@@ -331,7 +351,13 @@ private fun RootApp(
             }
         }
     }
-    LaunchedEffect(Unit) { checkForUpdate() }
+    LaunchedEffect(offlineMode) {
+        if (offlineMode) {
+            updateStatus = UpdateStatus.Idle
+        } else {
+            checkForUpdate()
+        }
+    }
 
     if (showTargetPicker) {
         TargetSelectionSheet(
@@ -427,7 +453,19 @@ private fun RootApp(
                 DialogDimAmount(0.34f)
                 Text(stringResource(R.string.install_confirm_title))
             },
-            text = { Text(stringResource(R.string.install_confirm_body)) },
+            text = {
+                Text(
+                    if (offlineMode) {
+                        stringResource(
+                            R.string.install_confirm_body_offline,
+                            device.model,
+                            device.kernelVersion,
+                        )
+                    } else {
+                        stringResource(R.string.install_confirm_body)
+                    },
+                )
+            },
             confirmButton = {
                 FilledTonalButton(onClick = {
                     clickHaptic(view)
@@ -477,13 +515,16 @@ private fun RootApp(
                     padding = padding,
                     device = device,
                     installState = installState,
+                    offlineMode = offlineMode,
                     updateStatus = updateStatus,
                     updateCardDismissed = updateCardDismissed,
                     onDismissUpdateCard = { updateCardDismissed = true },
                     onStartDownload = startDownload,
                     onInstall = {
                         selectedProfile = null
-                        if (advancedMode) {
+                        // The picker lists the remote catalog, which offline
+                        // mode has no way to load.
+                        if (advancedMode && !offlineMode) {
                             showTargetPicker = true
                             installViewModel.loadTargetCatalog()
                         } else {
@@ -498,10 +539,13 @@ private fun RootApp(
                 )
                 AppPage.Settings -> SettingsPage(
                     padding = padding,
+                    device = device,
                     accentColor = accentColor,
                     themeMode = themeMode,
                     advancedMode = advancedMode,
                     shizukuMode = shizukuMode,
+                    offlineMode = offlineMode,
+                    localPayloads = localPayloads,
                     updateStatus = updateStatus,
                     onCheckForUpdate = checkForUpdate,
                     onStartDownload = startDownload,
@@ -509,6 +553,10 @@ private fun RootApp(
                     onThemeModeChanged = onThemeModeChanged,
                     onAdvancedModeChanged = onAdvancedModeChanged,
                     onShizukuModeChanged = onShizukuModeChanged,
+                    onOfflineModeChanged = onOfflineModeChanged,
+                    onImportPayload = installViewModel::importLocalPayload,
+                    onClearPayload = installViewModel::clearLocalPayload,
+                    onDismissPayloadError = installViewModel::dismissLocalPayloadError,
                 )
             }
         }
@@ -552,6 +600,7 @@ private fun OverviewPage(
     padding: PaddingValues,
     device: DeviceSnapshot,
     installState: InstallUiState,
+    offlineMode: Boolean,
     updateStatus: UpdateStatus,
     updateCardDismissed: Boolean,
     onDismissUpdateCard: () -> Unit,
@@ -588,6 +637,7 @@ private fun OverviewPage(
             }
         }
         if (
+            !offlineMode &&
             !updateCardDismissed &&
             updateStatus.info != null
         ) {
@@ -601,7 +651,7 @@ private fun OverviewPage(
         }
         item { InstallStatusCard(installState, onInstall) }
         item { DeviceCard(device) }
-        item { HowItWorksCard() }
+        item { HowItWorksCard(offlineMode) }
     }
 }
 
@@ -706,7 +756,7 @@ private fun UpdateCard(
 }
 
 @Composable
-private fun HowItWorksCard() {
+private fun HowItWorksCard(offline: Boolean) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
@@ -719,7 +769,7 @@ private fun HowItWorksCard() {
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text(stringResource(R.string.how_it_works), style = MaterialTheme.typography.titleMedium)
-            installerSteps.forEach { step ->
+            installerSteps(offline).forEach { step ->
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -1401,10 +1451,13 @@ private fun saveRunLog(context: Context, uri: Uri, entry: InstallHistoryEntry) {
 @Composable
 private fun SettingsPage(
     padding: PaddingValues,
+    device: DeviceSnapshot,
     accentColor: AccentColor,
     themeMode: AppThemeMode,
     advancedMode: Boolean,
     shizukuMode: Boolean,
+    offlineMode: Boolean,
+    localPayloads: LocalPayloadUiState,
     updateStatus: UpdateStatus,
     onCheckForUpdate: () -> Unit,
     onStartDownload: (UpdateInfo) -> Unit,
@@ -1412,6 +1465,10 @@ private fun SettingsPage(
     onThemeModeChanged: (AppThemeMode) -> Unit,
     onAdvancedModeChanged: (Boolean) -> Unit,
     onShizukuModeChanged: (Boolean) -> Unit,
+    onOfflineModeChanged: (Boolean) -> Unit,
+    onImportPayload: (PayloadKind, Uri) -> Unit,
+    onClearPayload: (PayloadKind) -> Unit,
+    onDismissPayloadError: () -> Unit,
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -1424,6 +1481,40 @@ private fun SettingsPage(
     var colorMenuTop by remember { mutableStateOf(32.dp) }
     val density = LocalDensity.current
     val currentLanguageTag = AppPreferences.languageTag(context)
+    // The document picker hands back a Uri with no hint of what was being
+    // replaced, so the pending kind is remembered across the launch.
+    var pendingPayloadKind by remember { mutableStateOf<PayloadKind?>(null) }
+    val payloadPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        val kind = pendingPayloadKind
+        pendingPayloadKind = null
+        if (uri != null && kind != null) onImportPayload(kind, uri)
+    }
+    val pickPayload: (PayloadKind) -> Unit = { kind ->
+        pendingPayloadKind = kind
+        payloadPicker.launch(arrayOf("*/*"))
+    }
+
+    localPayloads.error?.let { message ->
+        AlertDialog(
+            onDismissRequest = onDismissPayloadError,
+            icon = { Icon(Icons.Rounded.Warning, contentDescription = null) },
+            title = {
+                DialogDimAmount(0.34f)
+                Text(stringResource(R.string.offline_import_failed_title))
+            },
+            text = { Text(message) },
+            confirmButton = {
+                FilledTonalButton(onClick = {
+                    clickHaptic(view)
+                    onDismissPayloadError()
+                }) {
+                    Text(stringResource(R.string.action_close))
+                }
+            },
+        )
+    }
 
     if (showShizukuMissingDialog) {
         AlertDialog(
@@ -1563,32 +1654,74 @@ private fun SettingsPage(
         }
         item { SectionLabel(stringResource(R.string.advanced)) }
         item {
-            SettingsSwitchCard(
-                icon = Icons.Rounded.Memory,
-                title = stringResource(R.string.advanced_mode),
-                description = stringResource(R.string.advanced_mode_description),
-                checked = advancedMode,
-                onCheckedChange = {
-                    clickHaptic(view)
-                    onAdvancedModeChanged(it)
-                },
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                SettingsSwitchCard(
+                    icon = Icons.Rounded.Memory,
+                    title = stringResource(R.string.advanced_mode),
+                    description = stringResource(R.string.advanced_mode_description),
+                    checked = advancedMode,
+                    position = SettingsCardPosition.Top,
+                    onCheckedChange = {
+                        clickHaptic(view)
+                        onAdvancedModeChanged(it)
+                    },
+                )
+                SettingsSwitchCard(
+                    icon = Icons.Rounded.CloudOff,
+                    title = stringResource(R.string.offline_mode),
+                    description = stringResource(R.string.offline_mode_description),
+                    checked = offlineMode,
+                    position = SettingsCardPosition.Bottom,
+                    onCheckedChange = {
+                        clickHaptic(view)
+                        onOfflineModeChanged(it)
+                    },
+                )
+            }
+        }
+        if (offlineMode) {
+            item { SectionLabel(stringResource(R.string.offline_payloads)) }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    LocalPayloadCard(
+                        title = stringResource(R.string.offline_payload_exploit),
+                        payload = localPayloads.exploit,
+                        position = SettingsCardPosition.Top,
+                        onPick = { pickPayload(PayloadKind.Exploit) },
+                        onClear = { onClearPayload(PayloadKind.Exploit) },
+                    )
+                    LocalPayloadCard(
+                        title = stringResource(R.string.offline_payload_kernelsu),
+                        payload = localPayloads.kernelSu,
+                        position = SettingsCardPosition.Bottom,
+                        onPick = { pickPayload(PayloadKind.KernelSu) },
+                        onClear = { onClearPayload(PayloadKind.KernelSu) },
+                    )
+                }
+            }
+            item { OfflineDeviceHint(device) }
         }
         item { SectionLabel(stringResource(R.string.about)) }
         item {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                UpdateSettingsCard(
-                    status = updateStatus,
-                    position = SettingsCardPosition.Top,
-                    onCheckForUpdate = onCheckForUpdate,
-                    onStartDownload = onStartDownload,
-                )
+                if (!offlineMode) {
+                    UpdateSettingsCard(
+                        status = updateStatus,
+                        position = SettingsCardPosition.Top,
+                        onCheckForUpdate = onCheckForUpdate,
+                        onStartDownload = onStartDownload,
+                    )
+                }
                 SettingsCard(
                     icon = Icons.Rounded.Info,
                     title = stringResource(R.string.about),
                     description = stringResource(R.string.about_description),
                     value = "",
-                    position = SettingsCardPosition.Bottom,
+                    position = if (offlineMode) {
+                        SettingsCardPosition.Single
+                    } else {
+                        SettingsCardPosition.Bottom
+                    },
                     onClick = {
                         clickHaptic(view)
                         showAboutDialog = true
@@ -1953,6 +2086,113 @@ private fun SettingsSwitchCard(
             }
             Switch(checked = checked, onCheckedChange = null)
         }
+    }
+}
+
+/**
+ * One imported payload file. The digest is shown because an offline install
+ * has no manifest to check the file against -- comparing it against the hash
+ * of what was pushed is the only integrity check available.
+ */
+@Composable
+private fun LocalPayloadCard(
+    title: String,
+    payload: LocalPayload?,
+    position: SettingsCardPosition,
+    onPick: () -> Unit,
+    onClear: () -> Unit,
+) {
+    val context = LocalContext.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val view = LocalView.current
+    Card(
+        onClick = {
+            clickHaptic(view)
+            onPick()
+        },
+        modifier = Modifier.fillMaxWidth(),
+        shape = expressiveClickableCardShape(interactionSource, position),
+        interactionSource = interactionSource,
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+        ),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 15.dp, bottom = 15.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(28.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = if (payload == null) {
+                        stringResource(R.string.offline_payload_pick)
+                    } else {
+                        stringResource(
+                            R.string.offline_payload_summary,
+                            payload.sourceName,
+                            Formatter.formatShortFileSize(context, payload.size),
+                        )
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (payload != null) {
+                    Text(
+                        text = payload.shortSha256,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                    )
+                }
+            }
+            if (payload == null) {
+                Text(
+                    text = stringResource(R.string.offline_payload_unset),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+            } else {
+                IconButton(onClick = {
+                    clickHaptic(view)
+                    onClear()
+                }) {
+                    Icon(
+                        Icons.Rounded.Close,
+                        contentDescription = stringResource(R.string.offline_payload_clear),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OfflineDeviceHint(device: DeviceSnapshot) {
+    Row(
+        modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            Icons.Rounded.Warning,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            text = stringResource(
+                R.string.offline_device_hint,
+                device.model,
+                device.kernelVersion,
+            ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

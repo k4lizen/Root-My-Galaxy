@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.Error
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material3.Button
@@ -105,9 +106,13 @@ internal data class InstallerStep(
     val icon: ImageVector,
 )
 
-internal val installerSteps = listOf(
+internal fun installerSteps(offline: Boolean) = listOf(
     InstallerStep(R.string.step_support_title, R.string.step_support_detail, Icons.Rounded.Security),
-    InstallerStep(R.string.step_download_title, R.string.step_download_detail, Icons.Rounded.CloudDownload),
+    if (offline) {
+        InstallerStep(R.string.step_local_title, R.string.step_local_detail, Icons.Rounded.FolderOpen)
+    } else {
+        InstallerStep(R.string.step_download_title, R.string.step_download_detail, Icons.Rounded.CloudDownload)
+    },
     InstallerStep(R.string.step_exploit_title, R.string.step_exploit_detail, Icons.Rounded.Memory),
     InstallerStep(R.string.step_ksu_title, R.string.step_ksu_detail, Icons.Rounded.Check),
 )
@@ -162,7 +167,7 @@ private fun InstallScreen(
             }
 
             InstallerStatusCard(installState)
-            InstallerSteps(installState.phase)
+            InstallerSteps(installState.phase, installState.offline)
             InstallerLog(
                 output = installState.log,
                 modifier = Modifier.weight(1f),
@@ -280,7 +285,7 @@ private fun InstallerStatusCard(installState: InstallUiState) {
 }
 
 @Composable
-private fun InstallerSteps(phase: InstallPhase) {
+private fun InstallerSteps(phase: InstallPhase, offline: Boolean) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
@@ -292,7 +297,7 @@ private fun InstallerSteps(phase: InstallPhase) {
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            installerSteps.forEachIndexed { index, step ->
+            installerSteps(offline).forEachIndexed { index, step ->
                 val stepState = stepState(phase, index)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,

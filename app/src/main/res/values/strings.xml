@@ -177,4 +177,25 @@
         <item quantity="one">This run and its log will be permanently removed.</item>
         <item quantity="other">These runs and their logs will be permanently removed.</item>
     </plurals>
+    <string name="offline_mode">Offline mode</string>
+    <string name="offline_mode_description">Install from payload files you supply. The app makes no network requests.</string>
+    <string name="offline_payloads">Offline payloads</string>
+    <string name="offline_payload_exploit">Exploit payload</string>
+    <string name="offline_payload_kernelsu">KernelSU binary</string>
+    <string name="offline_payload_pick">Tap to choose a file</string>
+    <string name="offline_payload_summary">%1$s \u00b7 %2$s</string>
+    <string name="offline_payload_unset">Choose</string>
+    <string name="offline_payload_clear">Remove</string>
+    <string name="offline_device_hint">This phone is %1$s on kernel %2$s. Nothing checks your files against it, so make sure they were built for it.</string>
+    <string name="offline_import_failed_title">Import failed</string>
+    <string name="local_payload_missing">The %1$s payload has not been imported</string>
+    <string name="local_payload_unreadable">Unable to read the selected file</string>
+    <string name="local_payload_empty">The selected file is empty</string>
+    <string name="local_catalog_unavailable">The payload catalog needs a connection. Turn off offline mode to browse it.</string>
+    <string name="status_checking_local">Checking imported payloads</string>
+    <string name="status_local_payloads_missing">Payloads not imported</string>
+    <string name="log_local_payload">[+] %1$s: %2$s (sha256 %3$s\u2026)</string>
+    <string name="step_local_title">Payloads</string>
+    <string name="step_local_detail">Use the imported payload files</string>
+    <string name="install_confirm_body_offline">The app will run the exploit and KernelSU payload you imported. Nothing is downloaded and no support profile is checked, so make sure the files match %1$s on kernel %2$s.</string>
 </resources>

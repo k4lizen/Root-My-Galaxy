@@ -34,6 +34,7 @@ object AppPreferences {
     private const val THEME_MODE = "theme_mode"
     private const val ADVANCED_MODE = "advanced_mode"
     private const val SHIZUKU_MODE = "shizuku_mode"
+    private const val OFFLINE_MODE = "offline_mode"
     private const val CONSUMED_INSTALL_REQUEST = "consumed_install_request"
 
     fun accentColor(context: Context): AccentColor = AccentColor.fromStoredValue(
@@ -71,6 +72,15 @@ object AppPreferences {
     fun setShizukuMode(context: Context, enabled: Boolean) {
         prefs(context).edit()
             .putBoolean(SHIZUKU_MODE, enabled)
+            .apply()
+    }
+
+    fun offlineMode(context: Context): Boolean =
+        prefs(context).getBoolean(OFFLINE_MODE, false)
+
+    fun setOfflineMode(context: Context, enabled: Boolean) {
+        prefs(context).edit()
+            .putBoolean(OFFLINE_MODE, enabled)
             .apply()
     }
 

@@ -1,6 +1,7 @@
 package dev.busung.s25uroot
 
 import android.app.Application
+import android.net.Uri
 import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -32,6 +33,7 @@ data class InstallUiState(
     val message: String = "",
     val probeOutput: String = "",
     val log: String = "",
+    val offline: Boolean = false,
 ) {
     val busy: Boolean
         get() = phase in setOf(
@@ -42,6 +44,12 @@ data class InstallUiState(
         )
 
 }
+
+data class LocalPayloadUiState(
+    val exploit: LocalPayload? = null,
+    val kernelSu: LocalPayload? = null,
+    val error: String? = null,
+)
 
 data class TargetCatalogUiState(
     val loading: Boolean = false,
@@ -78,19 +86,25 @@ private fun sha256OrNull(file: File): String? = runCatching {
 class InstallViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application
     private val repository = PayloadRepository(application)
+    private val localPayloadStore = LocalPayloadStore(application)
     private val historyStore = InstallHistoryStore(application)
     private val mutableState = MutableStateFlow(InstallUiState())
     private val mutableHistory = MutableStateFlow(historyStore.closeInterruptedRuns())
     private val mutableTargetCatalog = MutableStateFlow(TargetCatalogUiState())
+    private val mutableLocalPayloads = MutableStateFlow(LocalPayloadUiState())
     private var discoveryJob: Job? = null
     private var installJob: Job? = null
     private var activeHistoryEntry: InstallHistoryEntry? = null
 
     @Volatile
     private var activeRunShizuku: Boolean? = null
+
+    @Volatile
+    private var activeRunOffline: Boolean? = null
     val state: StateFlow<InstallUiState> = mutableState.asStateFlow()
     val history: StateFlow<List<InstallHistoryEntry>> = mutableHistory.asStateFlow()
     val targetCatalog: StateFlow<TargetCatalogUiState> = mutableTargetCatalog.asStateFlow()
+    val localPayloads: StateFlow<LocalPayloadUiState> = mutableLocalPayloads.asStateFlow()
 
     init {
         refresh()
@@ -102,29 +116,47 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
         discoveryJob?.cancel()
         discoveryJob = viewModelScope.launch(Dispatchers.IO) {
             val probe = NativeProbe.run()
+            // An import failure is dismissed by the user, not by the next
+            // refresh -- and a failed import refreshes, so re-reading the
+            // files here must not drop the error that triggered it.
+            mutableLocalPayloads.value = readLocalPayloads()
+                .copy(error = mutableLocalPayloads.value.error)
             if (detectInstalled()) {
                 mutableState.value = InstallUiState(
                     phase = InstallPhase.Installed,
                     message = app.getString(R.string.status_ksu_active),
                     probeOutput = probe,
                     log = probe,
+                    offline = AppPreferences.offlineMode(app),
                 )
                 return@launch
             }
             try {
-                val profile = repository.resolveTarget(DeviceSnapshot.current())
+                val profileId = if (AppPreferences.offlineMode(app)) {
+                    localPayloadStore.requirePayloads().profileId
+                } else {
+                    repository.resolveTarget(DeviceSnapshot.current()).profileId
+                }
                 mutableState.value = InstallUiState(
                     phase = InstallPhase.Ready,
                     message = app.getString(R.string.status_not_installed),
                     probeOutput = probe,
-                    log = "$probe\n${app.getString(R.string.log_profile, profile.profileId)}",
+                    log = "$probe\n${app.getString(R.string.log_profile, profileId)}",
+                    offline = AppPreferences.offlineMode(app),
                 )
             } catch (error: Throwable) {
                 mutableState.value = InstallUiState(
                     phase = InstallPhase.Failed,
-                    message = app.getString(R.string.status_support_failed),
+                    message = app.getString(
+                        if (AppPreferences.offlineMode(app)) {
+                            R.string.status_local_payloads_missing
+                        } else {
+                            R.string.status_support_failed
+                        },
+                    ),
                     probeOutput = probe,
                     log = "$probe\n[-] ${error.message ?: error.javaClass.simpleName}",
+                    offline = AppPreferences.offlineMode(app),
                 )
             }
         }
@@ -140,6 +172,12 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
 
     fun loadTargetCatalog() {
         if (mutableTargetCatalog.value.loading) return
+        if (AppPreferences.offlineMode(app)) {
+            mutableTargetCatalog.value = TargetCatalogUiState(
+                error = app.getString(R.string.local_catalog_unavailable),
+            )
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             mutableTargetCatalog.value = TargetCatalogUiState(loading = true)
             mutableTargetCatalog.value = try {
@@ -164,12 +202,16 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
             mutableState.value = InstallUiState(
                 phase = InstallPhase.Checking,
                 probeOutput = mutableState.value.probeOutput,
+                offline = AppPreferences.offlineMode(app),
             )
             startHistory()
             // Freeze the transport for the whole run so a mid-run preference
             // change cannot mix Shizuku and standalone execution between the
-            // exploit and the KernelSU staging steps.
+            // exploit and the KernelSU staging steps. The payload source is
+            // frozen for the same reason: flipping offline mode midway would
+            // otherwise swap which files the later steps stage.
             activeRunShizuku = AppPreferences.shizukuMode(app)
+            activeRunOffline = AppPreferences.offlineMode(app)
             try {
                 if (shizukuEnabled()) {
                     appendLog(app.getString(R.string.log_shizuku_prepare))
@@ -181,18 +223,11 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                     }
                     appendLog(app.getString(R.string.log_shizuku_permission))
                 }
-                setPhase(InstallPhase.Checking, app.getString(R.string.status_checking_github))
-                val profile = if (profileId == null) {
-                    repository.resolveTarget(DeviceSnapshot.current())
+                val payloads = if (offlineEnabled()) {
+                    resolveLocalPayloads()
                 } else {
-                    repository.resolveTarget(profileId)
+                    downloadPayloads(profileId)
                 }
-                appendLog(app.getString(R.string.log_profile, profile.profileId))
-                updateHistoryProfile(profile.profileId)
-
-                setPhase(InstallPhase.Downloading, app.getString(R.string.status_downloading_payload))
-                val payloads = repository.download(profile) { appendLog("[*] $it") }
-                appendLog(app.getString(R.string.log_download_verified))
 
                 setPhase(InstallPhase.Exploiting, app.getString(R.string.status_exploit_running))
                 executeExploit(payloads.exploit)
@@ -209,9 +244,80 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
                 finishHistory(InstallRunResult.Failed)
             } finally {
                 activeRunShizuku = null
+                activeRunOffline = null
             }
         }
     }
+
+    /**
+     * Offline runs have no manifest, so nothing checks these files against a
+     * device profile -- the digests go into the log to leave a record of what
+     * actually ran, which is the only trace of provenance an offline install
+     * gets.
+     */
+    private fun resolveLocalPayloads(): VerifiedPayloads {
+        setPhase(InstallPhase.Checking, app.getString(R.string.status_checking_local))
+        val payloads = localPayloadStore.requirePayloads()
+        appendLog(app.getString(R.string.log_profile, payloads.profileId))
+        updateHistoryProfile(payloads.profileId)
+        PayloadKind.entries.forEach { kind ->
+            val local = localPayloadStore.load(kind) ?: return@forEach
+            appendLog(
+                app.getString(
+                    R.string.log_local_payload,
+                    app.getString(kind.labelRes),
+                    local.sourceName,
+                    local.shortSha256,
+                ),
+            )
+        }
+        return payloads
+    }
+
+    private fun downloadPayloads(profileId: String?): VerifiedPayloads {
+        setPhase(InstallPhase.Checking, app.getString(R.string.status_checking_github))
+        val profile = if (profileId == null) {
+            repository.resolveTarget(DeviceSnapshot.current())
+        } else {
+            repository.resolveTarget(profileId)
+        }
+        appendLog(app.getString(R.string.log_profile, profile.profileId))
+        updateHistoryProfile(profile.profileId)
+
+        setPhase(InstallPhase.Downloading, app.getString(R.string.status_downloading_payload))
+        val payloads = repository.download(profile) { appendLog("[*] $it") }
+        appendLog(app.getString(R.string.log_download_verified))
+        return payloads
+    }
+
+    fun importLocalPayload(kind: PayloadKind, uri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            mutableLocalPayloads.value = try {
+                localPayloadStore.import(kind, uri)
+                readLocalPayloads()
+            } catch (error: Throwable) {
+                readLocalPayloads().copy(error = error.message ?: error.javaClass.simpleName)
+            }
+            refresh()
+        }
+    }
+
+    fun clearLocalPayload(kind: PayloadKind) {
+        viewModelScope.launch(Dispatchers.IO) {
+            localPayloadStore.clear(kind)
+            mutableLocalPayloads.value = readLocalPayloads()
+            refresh()
+        }
+    }
+
+    fun dismissLocalPayloadError() {
+        mutableLocalPayloads.value = mutableLocalPayloads.value.copy(error = null)
+    }
+
+    private fun readLocalPayloads() = LocalPayloadUiState(
+        exploit = localPayloadStore.load(PayloadKind.Exploit),
+        kernelSu = localPayloadStore.load(PayloadKind.KernelSu),
+    )
 
     private suspend fun executeExploit(payload: File) {
         val shizuku = shizukuEnabled()
@@ -419,6 +525,8 @@ class InstallViewModel(application: Application) : AndroidViewModel(application)
     private fun nativeHelperFile() = File(app.applicationInfo.nativeLibraryDir, "libcve43499root.so")
 
     private fun shizukuEnabled(): Boolean = activeRunShizuku ?: AppPreferences.shizukuMode(app)
+
+    private fun offlineEnabled(): Boolean = activeRunOffline ?: AppPreferences.offlineMode(app)
 
     private fun shizukuStage(source: File, target: String, mode: String): File {
         val staged = File(target)
